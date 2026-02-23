@@ -17,7 +17,7 @@ from datetime import datetime
 import pytz
 from Extractor.core.utils import forward_to_log
 import base64
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import quote
 
 india_timezone = pytz.timezone('Asia/Kolkata')
 current_time = datetime.now(india_timezone)
@@ -26,6 +26,16 @@ time_new = current_time.strftime("%d-%m-%Y %I:%M %p")
 
 apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
+
+
+def build_encrypted_content_url(content_id):
+    """Build new Classplus signed URL endpoint using encrypted contentId."""
+    if not content_id:
+        return ""
+    return (
+        "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
+        f"?contentId={quote(str(content_id), safe='')}"
+    )
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -412,11 +422,10 @@ async def extract_batch(app, message, org_name, batch_id):
                                 video_url = video.get("url", "")
                                 content_hash = video.get("contentHashId", "")
                         
-                                if video_url:
-                                    # Use original URL for direct download
-                                    decoded_url = encode_partial_url(video_url)
-                                    # Clean URL without hash appended
-                                    outputs.append(f"🎬 {name}: {decoded_url}\n")
+                                if video_url or content_hash:
+                                    encrypted_link = build_encrypted_content_url(content_hash)
+                                    output_link = encrypted_link or encode_partial_url(video_url)
+                                    outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
                     print(f"Error fetching live videos: {e}")
 
@@ -471,10 +480,14 @@ async def extract_batch(app, message, org_name, batch_id):
                         else:
                             icon = "📄"
                         
-                        # Use original URL for direct download
-                        decoded_url = encode_partial_url(video_url)
-                        # Format vertically - each item on its own line (no hash appended)
-                        full_info = f"{indent}{icon} {sub_name}: {decoded_url}\n"
+                        # Use encrypted contentId endpoint for videos, keep source URL for non-videos
+                        if icon == "🎬":
+                            output_link = build_encrypted_content_url(content_hash) or encode_partial_url(video_url)
+                        else:
+                            output_link = encode_partial_url(video_url)
+
+                        # Format vertically - each item on its own line
+                        full_info = f"{indent}{icon} {sub_name}: {output_link}\n"
                         result.append(full_info)
 
                 elif content_type == "1":  # Folder
