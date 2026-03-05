@@ -27,16 +27,15 @@ apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
 
 
-def build_classplus_headers(token, org_code=None):
+def build_classplus_headers(token, org_code):
     headers = {
         "Accept": "application/json, text/plain, */*",
         "region": "IN",
         "accept-language": "en",
         "User-Agent": "Mozilla/5.0",
-        "x-access-token": token
+        "x-access-token": token,
+        "x-org-code": org_code,
     }
-    if org_code:
-        headers["x-org-code"] = org_code
     return headers
 
 
@@ -52,30 +51,29 @@ def is_empty_api_response(response):
     return data in (None, {}, [], "")
 
 
-def classplus_request_with_fallback(url, token, org_code=None):
+def classplus_request_with_fallback(url, token, org_code):
     primary_headers = build_classplus_headers(token, org_code)
     print(f"[Classplus Debug] Request URL: {url}")
-    print(f"[Classplus Debug] Headers used (primary): {primary_headers}")
+    print(f"[Classplus Debug] Headers used: {primary_headers}")
     primary_response = s.get(url, headers=primary_headers)
-    print(f"[Classplus Debug] Response status (primary): {primary_response.status_code}")
+    print(f"[Classplus Debug] Response status: {primary_response.status_code}")
+    print(f"[Classplus Debug] Response body: {primary_response.text}")
+
+    if primary_response.status_code == 401:
+        return primary_response
 
     if not is_empty_api_response(primary_response):
         return primary_response
 
-    fallback_headers = build_classplus_headers(token)
-    print(f"[Classplus Debug] Headers used (fallback): {fallback_headers}")
-    fallback_response = s.get(url, headers=fallback_headers)
-    print(f"[Classplus Debug] Response status (fallback): {fallback_response.status_code}")
-
-    if not is_empty_api_response(fallback_response):
-        return fallback_response
-
-    print(f"[Classplus Debug] Response body (primary failure): {primary_response.text}")
-    print(f"[Classplus Debug] Response body (fallback failure): {fallback_response.text}")
+    print("[Classplus Debug] Empty API payload detected. Retrying once...")
+    fallback_response = s.get(url, headers=primary_headers)
+    print(f"[Classplus Debug] Retry response status: {fallback_response.status_code}")
+    print(f"[Classplus Debug] Retry response body: {fallback_response.text}")
+    
     return fallback_response
 
 
-def fetch_jw_signed_url(content_id, token):
+def fetch_jw_signed_url(content_id, token, org_code):
     """Resolve a Classplus content hash to a signed URL via API."""
     token = (token or "").strip()
     if not token:
@@ -83,19 +81,16 @@ def fetch_jw_signed_url(content_id, token):
     if not content_id:
         return None, None
 
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "region": "IN",
-        "accept-language": "en",
-        "User-Agent": "Mozilla/5.0",
-        "x-access-token": token,
-    }
+    headers = build_classplus_headers(token, org_code)
+    print("[Classplus Debug] Request URL: https://api.classplusapp.com/cams/uploader/video/jw-signed-url")
     response = s.get(
         "https://api.classplusapp.com/cams/uploader/video/jw-signed-url",
         params={"contentId": str(content_id)},
         headers=headers,
     )
-
+    print(f"[Classplus Debug] Response status: {response.status_code}")
+    print(f"[Classplus Debug] Response body: {response.text}")
+    
     if response.status_code == 401:
         return None, "Invalid or expired token"
 
@@ -121,7 +116,7 @@ async def classplus_txt(app, message):
         "<code>ORG_CODE*Mobile</code>\n\n"
         "Example:\n"
         "- <code>ABCD*9876543210</code>\n"
-        "- <code>eyJhbGciOiJIUzI1NiIsInR5cCI6...</code>"
+        "- <code>ABCD*eyJhbGciOiJIUzI1NiIsInR5cCI6...</code>"
     )
     await forward_to_log(details, "Classplus Extractor")
     user_input = details.text.strip()
@@ -129,6 +124,7 @@ async def classplus_txt(app, message):
     if "*" in user_input and user_input.split("*", 1)[1].isdigit():
         try:
             org_code, mobile = user_input.split("*", 1)
+            org_code = org_code.strip().upper()
             
             device_id = str(uuid.uuid4()).replace('-', '')
             headers = {
@@ -363,6 +359,7 @@ async def classplus_txt(app, message):
 
     elif "*" in user_input:
         org_code, token = user_input.split("*", 1)
+        org_code = org_code.strip().upper()
         token = token.strip()
         if not token:
             await message.reply("Token required")
@@ -391,49 +388,8 @@ async def classplus_txt(app, message):
             await message.reply("Unable to fetch courses for this account.")
     
     else:
-        token = user_input.strip()
-        if not token:
-            await message.reply("Token required")
-            return
-
-        a = f"CLASSPLUS LOGIN SUCCESSFUL FOR\n\n<blockquote>`{token}`</blockquote>"
-        await app.send_message(PREMIUM_LOGS, a)
-        response = classplus_request_with_fallback(f"{apiurl}/v2/courses?tabCategoryId=1", token)
-        if response.status_code == 200:
-            courses = response.json()["data"]["courses"]
-    
-            s.session_data = {
-                "token": token,
-                "courses": {course["id"]: course["name"] for course in courses}
-            }
-
-            org_name = None
-
-            for course in courses:
-                shareable_link = course["shareableLink"]
-    
-                if "courses.store" in shareable_link:
-  
-                    new_data = shareable_link.split('.')[0].split('//')[-1]
-                    org_response = s.get(
-                        f"https://api.classplusapp.com/v2/orgs/{new_data}",
-                        headers=build_classplus_headers(token)
-                    )
-        
-                    if org_response.status_code == 200:
-                        org_data = org_response.json().get("data", {})
-                        org_id = org_data.get("orgId")
-                        org_name = org_data.get("orgName")
-                else:
-                    org_name = shareable_link.split('//')[1].split('.')[1]
-
-                print(f"Org Name: {org_name}")
-
-            await fetch_batches(app, message, org_name)
-        elif response.status_code == 401:
-            await message.reply("Invalid or expired token")
-        else:
-            await message.reply("Unable to fetch courses for this account.")
+        await message.reply("Please send credentials in ORGCODE*Mobile or ORGCODE*Token format.")
+        return
 
 
 
@@ -510,7 +466,8 @@ async def extract_batch(app, message, org_name, batch_id):
                     primary_status = primary_response.status
                     primary_text = await primary_response.text()
                     print(f"[Classplus Debug] Response status (primary): {primary_status}")
-
+                    print(f"[Classplus Debug] Response body (primary): {primary_text}")
+                    
                     primary_json = {}
                     try:
                         primary_json = json.loads(primary_text)
@@ -518,17 +475,21 @@ async def extract_batch(app, message, org_name, batch_id):
                         primary_json = {}
 
             primary_data = primary_json.get("data") if isinstance(primary_json, dict) else None
+            if primary_status == 401:
+                raise PermissionError("Invalid or expired token")
+
             if primary_status == 200 and primary_data not in (None, {}, [], ""):
                 return primary_json
 
-            fallback_headers = build_classplus_headers(session_data["token"])
-            print(f"[Classplus Debug] Headers used (fallback): {fallback_headers}")
+            retry_headers = build_classplus_headers(session_data["token"], org_code)
+            print(f"[Classplus Debug] Empty API payload detected. Retrying once with headers: {retry_headers}")
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=fallback_headers) as fallback_response:
+                async with session.get(url, headers=retry_headers) as fallback_response:
                     fallback_status = fallback_response.status
                     fallback_text = await fallback_response.text()
                     print(f"[Classplus Debug] Response status (fallback): {fallback_status}")
-
+                    print(f"[Classplus Debug] Response body (fallback): {fallback_text}")
+                    
                     fallback_json = {}
                     try:
                         fallback_json = json.loads(fallback_text)
@@ -536,6 +497,9 @@ async def extract_batch(app, message, org_name, batch_id):
                         fallback_json = {}
 
             fallback_data = fallback_json.get("data") if isinstance(fallback_json, dict) else None
+            if fallback_status == 401:
+                raise PermissionError("Invalid or expired token")
+            
             if fallback_status == 200 and fallback_data not in (None, {}, [], ""):
                 return fallback_json
 
@@ -566,7 +530,7 @@ async def extract_batch(app, message, org_name, batch_id):
                         content_hash = video.get("contentHashId", "")
                 
                         if video_url or content_hash:
-                            signed_url, token_error = fetch_jw_signed_url(content_hash, session_data["token"])
+                            signed_url, token_error = fetch_jw_signed_url(content_hash, session_data["token"], org_code)
                             if token_error == "Invalid or expired token":
                                 raise PermissionError(token_error)
                             output_link = signed_url or encode_partial_url(video_url)
@@ -625,7 +589,7 @@ async def extract_batch(app, message, org_name, batch_id):
                         
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
-                            signed_url, token_error = fetch_jw_signed_url(content_hash, session_data["token"])
+                            signed_url, token_error = fetch_jw_signed_url(content_hash, session_data["token"], org_code)
                             if token_error == "Invalid or expired token":
                                 raise PermissionError(token_error)
                             output_link = signed_url or encode_partial_url(video_url)
